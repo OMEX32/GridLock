@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  guildId   String   @unique
+  name      String
+  tier      String   @default("free")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  players   Player[]
+  events    Event[]
+  
+  @@index([guildId])
+}
+
+model Player {
+  id        String   @id @default(cuid())
+  discordId String
+  username  String
+  teamId    String
+  createdAt DateTime @default(now())
+  
+  team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  responses Response[]
+  
+  @@unique([discordId, teamId])
+  @@index([teamId])
+  @@index([discordId])
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  teamId      String
+  name        String
+  date        String   // Store as string like "Feb 15, 2025"
+  time        String   // Store as string like "7:00 PM EST"
+  gameType    String?
+  createdBy   String
+  messageId   String?  // Discord message ID for reactions
+  channelId   String?  // Discord channel ID
+  createdAt   DateTime @default(now())
+  
+  team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  responses Response[]
+  
+  @@index([teamId])
+  @@index([createdAt])
+}
+
+model Response {
+  id        String   @id @default(cuid())
+  playerId  String
+  eventId   String
+  status    String   // "available", "unavailable", "maybe"
+  timestamp DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  event  Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  
+  @@unique([playerId, eventId])
+  @@index([eventId])
+  @@index([playerId])
+}

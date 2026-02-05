@@ -1,0 +1,41 @@
+require('dotenv').config();
+const { REST, Routes } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+
+const commands = [];
+const commandsPath = path.join(__dirname, '../commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+
+console.log('═══════════════════════════════════════');
+console.log('🔄 Loading commands...');
+console.log('═══════════════════════════════════════');
+
+for (const file of commandFiles) {
+  const command = require(path.join(commandsPath, file));
+  if ('data' in command && 'execute' in command) {
+    commands.push(command.data.toJSON());
+    console.log(`✅ Loaded: ${command.data.name}`);
+  }
+}
+
+const rest = new REST().setToken(process.env.DISCORD_TOKEN);
+
+(async () => {
+  try {
+    console.log('═══════════════════════════════════════');
+    console.log(`🔄 Registering ${commands.length} slash commands...`);
+    console.log('═══════════════════════════════════════');
+
+    const data = await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands },
+    );
+
+    console.log('═══════════════════════════════════════');
+    console.log(`✅ Successfully registered ${data.length} commands!`);
+    console.log('═══════════════════════════════════════');
+  } catch (error) {
+    console.error('❌ Error registering commands:', error);
+  }
+})();
