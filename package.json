@@ -1,0 +1,14 @@
+{
+  "name": "GridLock",
+  "version": "1.0.0",
+  "description": "Discord bot for esports team management",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "register": "node utils/registerCommands.js"
+  },
+  "keywords": ["discord", "bot", "esports", "roster"],
+  "author": "OMEX32",
+  "license": "MIT"
+}
