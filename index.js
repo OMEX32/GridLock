@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { loadCommands } = require('./utils/commandLoader');
+const { startCleanupJob } = require('./utils/cleanupJob');
 
 const client = new Client({
   intents: [
@@ -30,6 +31,9 @@ client.once('ready', () => {
   console.log(`👥 Users: ${client.users.cache.size}`);
   console.log(`📋 Commands loaded: ${client.commands.size}`);
   console.log('═══════════════════════════════════════');
+  
+  // Start cleanup job
+  startCleanupJob();
 });
 
 // Handle slash commands
@@ -101,14 +105,12 @@ client.on('messageReactionRemove', async (reaction, user) => {
 });
 
 async function handleReaction(reaction, user, action) {
-  const { getEventByMessageId, getOrCreatePlayer, setPlayerResponse, prisma } = require('./utils/database');
+  const { getEventByMessageId, getOrCreatePlayer, setPlayerResponse, prisma, checkTeamLimits } = require('./utils/database');
   const config = require('./config/config');
 
-  // Check if this is an event message
   const event = await getEventByMessageId(reaction.message.id);
   if (!event) return;
 
-  // Map emoji to status
   let status = null;
   if (reaction.emoji.name === config.emojis.available) {
     status = 'available';
@@ -117,14 +119,42 @@ async function handleReaction(reaction, user, action) {
   } else if (reaction.emoji.name === config.emojis.maybe) {
     status = 'maybe';
   } else {
-    return; // Not a valid availability emoji
+    return;
   }
 
   if (action === 'add') {
-    // Get or create player
+    // Check team limits
+    const limits = await checkTeamLimits(event.teamId);
+    
+    // Check if player already exists
+    let existingPlayer = await prisma.player.findFirst({
+      where: {
+        discordId: user.id,
+        teamId: event.teamId,
+      },
+    });
+
+    // If player doesn't exist and team is at limit, block them
+    if (!existingPlayer && limits.isAtPlayerLimit) {
+      await reaction.users.remove(user.id);
+      
+      try {
+        await user.send(
+          `❌ **Team at Player Limit**\n\n` +
+          `This team is at the free tier limit of ${limits.maxPlayers} players.\n\n` +
+          `Ask your team admin to upgrade to add more players!\n\n` +
+          `💎 Upgrade unlocks unlimited players and premium features.`
+        );
+      } catch (error) {
+        console.log(`Could not DM ${user.username} about player limit`);
+      }
+      
+      return;
+    }
+
     const player = await getOrCreatePlayer(user.id, user.username, event.teamId);
 
-    // Remove other reactions from this user
+    // Remove other reactions
     const message = reaction.message;
     for (const [, r] of message.reactions.cache) {
       if (r.emoji.name !== reaction.emoji.name) {
@@ -132,12 +162,10 @@ async function handleReaction(reaction, user, action) {
       }
     }
 
-    // Save response
     await setPlayerResponse(player.id, event.id, status);
 
     console.log(`✅ ${user.username} marked as ${status} for ${event.name}`);
 
-    // Send DM confirmation
     try {
       const statusEmoji = {
         available: '✅ Available',
@@ -149,12 +177,10 @@ async function handleReaction(reaction, user, action) {
         `You've been marked as **${statusEmoji[status]}** for **${event.name}** on ${event.date} at ${event.time}`
       );
     } catch (error) {
-      // User has DMs disabled
       console.log(`Could not DM ${user.username}`);
     }
 
   } else if (action === 'remove') {
-    // Delete response if user removes all reactions
     const player = await prisma.player.findFirst({
       where: {
         discordId: user.id,

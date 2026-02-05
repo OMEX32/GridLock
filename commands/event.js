@@ -1,7 +1,8 @@
 const { SlashCommandBuilder } = require('discord.js');
-const { getOrCreateTeam, createEvent } = require('../utils/database');
-const { createSuccessEmbed, createErrorEmbed, createEventEmbed } = require('../utils/embeds');
+const { getOrCreateTeam, createEvent, checkTeamLimits } = require('../utils/database');
+const { createSuccessEmbed, createErrorEmbed, createEventEmbed, createWarningEmbed } = require('../utils/embeds');
 const config = require('../config/config');
+const { isValidDate, isValidTime, sanitizeInput } = require('../utils/validation');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -53,16 +54,58 @@ async function handleCreateEvent(interaction) {
   await interaction.deferReply();
 
   try {
-    const name = interaction.options.getString('name');
-    const date = interaction.options.getString('date');
-    const time = interaction.options.getString('time');
+    let name = interaction.options.getString('name');
+    let date = interaction.options.getString('date');
+    let time = interaction.options.getString('time');
     const gameType = interaction.options.getString('game');
+
+    name = sanitizeInput(name, 100);
+    date = sanitizeInput(date, 50);
+    time = sanitizeInput(time, 50);
+
+    if (!name || name.length < 3) {
+      const embed = createErrorEmbed(
+        'Invalid Event Name',
+        'Event name must be at least 3 characters long.'
+      );
+      return await interaction.editReply({ embeds: [embed] });
+    }
+
+    if (!isValidDate(date)) {
+      const embed = createErrorEmbed(
+        'Invalid Date Format',
+        'Please use a format like: "Feb 15" or "February 15, 2025"'
+      );
+      return await interaction.editReply({ embeds: [embed] });
+    }
+
+    if (!isValidTime(time)) {
+      const embed = createErrorEmbed(
+        'Invalid Time Format',
+        'Please use a format like: "7PM", "7:00 PM EST", or "19:00"'
+      );
+      return await interaction.editReply({ embeds: [embed] });
+    }
 
     // Get or create team
     const team = await getOrCreateTeam(
       interaction.guild.id,
       interaction.guild.name
     );
+
+    // Check team limits
+    const limits = await checkTeamLimits(team.id);
+
+    // Check if at player limit (only matters for reactions, but warn early)
+    if (limits.isAtPlayerLimit) {
+      const warningEmbed = createWarningEmbed(
+        'Team at Player Limit',
+        `Your team is at the free tier limit of ${limits.maxPlayers} players.\n\n` +
+        'New members won\'t be able to mark availability until you upgrade.\n\n' +
+        '💎 Use `/upgrade` to unlock unlimited players and features!'
+      );
+      await interaction.followUp({ embeds: [warningEmbed], ephemeral: true });
+    }
 
     // Create the event message first
     const eventEmbed = createEventEmbed({
