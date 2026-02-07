@@ -1,5 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
-const { getOrCreateTeam, getUpcomingEvents } = require('../utils/database');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+const { getGuildTeams } = require('../utils/database');
 const { createRosterEmbed, createErrorEmbed, createWarningEmbed } = require('../utils/embeds');
 
 module.exports = {
@@ -17,51 +19,111 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const team = await getOrCreateTeam(
-        interaction.guild.id,
-        interaction.guild.name
+      const eventFilter = interaction.options.getString('event');
+
+      // Get user's teams (teams where they have the role)
+      const allTeams = await getGuildTeams(interaction.guild.id);
+      
+      const userTeams = allTeams.filter(team => 
+        interaction.member.roles.cache.has(team.roleId)
       );
 
-      const eventFilter = interaction.options.getString('event');
-      const events = await getUpcomingEvents(team.id, 10);
-
-      if (events.length === 0) {
-        const embed = createWarningEmbed(
-          'No Events Found',
-          'There are no upcoming events. Create one with `/event create`!'
+      if (userTeams.length === 0) {
+        const embed = createErrorEmbed(
+          'No Team Access',
+          'You are not in any teams.\n\n' +
+          'You need to have a team role assigned to view rosters.\n' +
+          'Ask an admin to assign you a team role or create a team with `/team create`.'
         );
         return await interaction.editReply({ embeds: [embed] });
       }
 
-      // Filter by event name if specified
-      let filteredEvents = events;
-      if (eventFilter) {
-        filteredEvents = events.filter(e => 
-          e.name.toLowerCase().includes(eventFilter.toLowerCase())
-        );
+      console.log(`User is in ${userTeams.length} team(s)`);
 
-        if (filteredEvents.length === 0) {
-          const embed = createErrorEmbed(
-            'Event Not Found',
-            `No event matching "${eventFilter}" was found.`
-          );
-          return await interaction.editReply({ embeds: [embed] });
+      // Get events from user's teams
+      let events = [];
+      
+      if (eventFilter) {
+        // Get specific event(s) matching the filter
+        for (const team of userTeams) {
+          const teamEvents = await prisma.event.findMany({
+            where: {
+              teamId: team.id,
+              name: {
+                contains: eventFilter,
+                mode: 'insensitive'
+              }
+            },
+            include: {
+              responses: {
+                include: {
+                  player: true
+                }
+              }
+            },
+            orderBy: {
+              createdAt: 'desc'
+            },
+            take: 3
+          });
+          events.push(...teamEvents.map(e => ({ ...e, team })));
+        }
+      } else {
+        // Get all upcoming events from user's teams
+        for (const team of userTeams) {
+          const teamEvents = await prisma.event.findMany({
+            where: {
+              teamId: team.id
+            },
+            include: {
+              responses: {
+                include: {
+                  player: true
+                }
+              }
+            },
+            orderBy: {
+              createdAt: 'desc'
+            },
+            take: 3
+          });
+          events.push(...teamEvents.map(e => ({ ...e, team })));
         }
       }
 
-      // Get all team members
-      const guild = interaction.guild;
-      const allMembers = await guild.members.fetch();
-      const botMembers = allMembers.filter(m => !m.user.bot);
+      if (events.length === 0) {
+        const embed = eventFilter
+          ? createErrorEmbed(
+              'Event Not Found',
+              `No event matching "${eventFilter}" was found in your teams.`
+            )
+          : createWarningEmbed(
+              'No Events Found',
+              'There are no events yet in your teams.\n\nCreate one with `/event create`!'
+            );
+        return await interaction.editReply({ embeds: [embed] });
+      }
 
-      // Generate roster for each event
+      console.log(`Found ${events.length} event(s)`);
+
+      // Sort by creation date
+      events.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      // Generate roster for each event (max 3)
       const embeds = [];
 
-      for (const event of filteredEvents.slice(0, 3)) { // Show max 3 events
+      for (const event of events.slice(0, 3)) {
         const available = [];
         const unavailable = [];
         const maybe = [];
         const noResponse = [];
+
+        // Get all players on this team
+        const allPlayers = await prisma.player.findMany({
+          where: {
+            teamId: event.teamId
+          }
+        });
 
         // Get responses for this event
         const responseMap = new Map();
@@ -69,10 +131,10 @@ module.exports = {
           responseMap.set(r.player.discordId, r.status);
         });
 
-        // Categorize all members
-        for (const [, member] of botMembers) {
-          const status = responseMap.get(member.id);
-          const displayName = member.nickname || member.user.username;
+        // Categorize all players on the team
+        for (const player of allPlayers) {
+          const status = responseMap.get(player.discordId);
+          const displayName = player.username;
 
           if (status === 'available') {
             available.push(displayName);
@@ -94,12 +156,19 @@ module.exports = {
           noResponse
         );
 
+        // Add team name to footer
+        embed.setFooter({ 
+          text: `Team: ${event.team.name}` 
+        });
+
         embeds.push(embed);
       }
 
-      if (filteredEvents.length > 3) {
-        embeds[embeds.length - 1].setFooter({
-          text: `Showing 3 of ${filteredEvents.length} events. Use /roster event:name to filter.`
+      if (events.length > 3) {
+        const lastEmbed = embeds[embeds.length - 1];
+        const currentFooter = lastEmbed.data.footer?.text || '';
+        lastEmbed.setFooter({ 
+          text: `${currentFooter} | Showing 3 of ${events.length} events` 
         });
       }
 
@@ -109,7 +178,7 @@ module.exports = {
       console.error('Error showing roster:', error);
       const errorEmbed = createErrorEmbed(
         'Failed to Show Roster',
-        'There was an error retrieving the roster. Please try again.'
+        `There was an error retrieving the roster: ${error.message}\n\nPlease try again.`
       );
       await interaction.editReply({ embeds: [errorEmbed] });
     }

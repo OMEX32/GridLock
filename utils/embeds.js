@@ -41,6 +41,11 @@ function createEventEmbed(event) {
     embed.addFields({ name: '🎮 Game', value: event.gameType, inline: true });
   }
 
+  // Add notes if provided
+  if (event.notes) {
+    embed.addFields({ name: '📝 Notes', value: event.notes, inline: false });
+  }
+
   return embed;
 }
 
