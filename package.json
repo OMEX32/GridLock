@@ -1,14 +1,45 @@
 {
-  "name": "GridLock",
+  "name": "gridlock",
   "version": "1.0.0",
-  "description": "Discord bot for esports team management",
+  "description": "Discord bot for esports team availability and roster management",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "npx prisma migrate deploy && npx prisma generate && node index.js",
     "dev": "nodemon index.js",
-    "register": "node utils/registerCommands.js"
+    "register": "node utils/registerCommands.js",
+    "db:migrate": "npx prisma migrate dev",
+    "db:studio": "npx prisma studio",
+    "db:generate": "npx prisma generate",
+    "db:push": "npx prisma db push",
+    "db:seed": "node prisma/seed.js"
   },
-  "keywords": ["discord", "bot", "esports", "roster"],
+  "keywords": [
+    "discord",
+    "bot",
+    "esports",
+    "roster",
+    "team-management",
+    "availability",
+    "gaming",
+    "tournament"
+  ],
   "author": "OMEX32",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OMEX32/gridlock"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.9.1",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3",
+    "prisma": "^5.9.1"
+  }
 }

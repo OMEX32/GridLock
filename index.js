@@ -2,8 +2,7 @@ require('dotenv').config();
 const { Client, Collection, GatewayIntentBits } = require('discord.js');
 const { loadCommands } = require('./utils/commandLoader');
 const { startCleanupJob } = require('./utils/cleanupJob');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const { prisma } = require('./utils/database');
 
 const client = new Client({
   intents: [
@@ -11,16 +10,26 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
   ],
 });
 
 client.commands = new Collection();
 
+// Reaction debounce queue
+const reactionQueue = new Map();
+
 // Load commands
+console.log('═══════════════════════════════════════');
+console.log('🔄 Loading commands...');
+console.log('═══════════════════════════════════════');
 loadCommands(client);
 
-// Bot ready event
-client.once('ready', () => {
+// ============================================================================
+// BOT READY EVENT
+// ============================================================================
+
+client.once('clientReady', () => {
   console.log('═══════════════════════════════════════');
   console.log('✅ Bot is online!');
   console.log(`📛 Logged in as: ${client.user.tag}`);
@@ -28,51 +37,97 @@ client.once('ready', () => {
   console.log(`📊 Servers: ${client.guilds.cache.size}`);
   console.log(`👥 Users: ${client.users.cache.size}`);
   console.log(`📋 Commands loaded: ${client.commands.size}`);
+  console.log(`💾 Memory: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`);
   console.log('═══════════════════════════════════════');
+
+  // Update bot status
+  client.user.setActivity(`/help | ${client.guilds.cache.size} servers`, { 
+    type: 'WATCHING' 
+  });
 
   // Start cleanup job
   startCleanupJob();
+  
+  // Log stats every 6 hours
+  setInterval(() => {
+    const memory = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+    const uptime = (process.uptime() / 3600).toFixed(2);
+    console.log('📊 Performance Stats:');
+    console.log(`  Servers: ${client.guilds.cache.size}`);
+    console.log(`  Users: ${client.users.cache.size}`);
+    console.log(`  Memory: ${memory} MB`);
+    console.log(`  Uptime: ${uptime} hours`);
+  }, 6 * 60 * 60 * 1000);
 });
 
 // ============================================================================
-// INTERACTION HANDLER - Handles all interactions
+// INTERACTION HANDLER - Handles all slash commands and interactions
 // ============================================================================
 
 client.on('interactionCreate', async interaction => {
-  console.log('\n🔔 Interaction:', {
-    type: interaction.type,
-    user: interaction.user.tag,
-    id: interaction.customId || interaction.commandName
-  });
+  console.log('\n' + '═'.repeat(50));
+  console.log('🔔 INTERACTION DETECTED');
+  console.log('Type:', interaction.type);
+  console.log('Is Command?', interaction.isChatInputCommand());
+  console.log('Command Name:', interaction.commandName || 'N/A');
+  console.log('User:', interaction.user.tag);
+  console.log('Guild:', interaction.guild?.name || 'DM');
+  console.log('Channel:', interaction.channel?.name || 'Unknown');
+  console.log('═'.repeat(50));
 
   // Handle slash commands
   if (interaction.isChatInputCommand()) {
     const command = client.commands.get(interaction.commandName);
 
+    console.log('📋 Command in collection?', command ? 'YES ✅' : 'NO ❌');
+
     if (!command) {
-      console.error(`❌ Command not found: ${interaction.commandName}`);
+      console.error(`❌ Command "${interaction.commandName}" not found in collection!`);
+      
+      try {
+        await interaction.reply({
+          content: `❌ Command \`/${interaction.commandName}\` is not available!\n\n**Available commands:**\n${Array.from(client.commands.keys()).map(cmd => `\`/${cmd}\``).join(', ')}`,
+          ephemeral: true
+        });
+      } catch (replyError) {
+        console.error('❌ Failed to reply:', replyError.message);
+      }
       return;
     }
 
     try {
+      console.log(`🚀 EXECUTING COMMAND: ${interaction.commandName}`);
+      const startTime = Date.now();
+      
       await command.execute(interaction);
-      console.log(`✅ Executed: /${interaction.commandName}`);
+      
+      const duration = Date.now() - startTime;
+      console.log(`✅ COMMAND COMPLETED: ${interaction.commandName} (${duration}ms)`);
+      
     } catch (error) {
-      console.error(`❌ Command error:`, error);
+      console.error('❌ COMMAND EXECUTION ERROR:');
+      console.error('Command:', interaction.commandName);
+      console.error('Error:', error.message);
+      console.error('Stack:', error.stack);
       
       const errorResponse = { 
-        content: '❌ An error occurred while executing this command!', 
+        content: `❌ An error occurred while executing this command!\n\n**Error:** \`${error.message}\`\n\nThis has been logged. Please try again or contact support.`, 
         ephemeral: true 
       };
       
       try {
-        if (interaction.replied || interaction.deferred) {
+        if (interaction.replied) {
+          console.log('Already replied, sending followUp...');
           await interaction.followUp(errorResponse);
+        } else if (interaction.deferred) {
+          console.log('Deferred, editing reply...');
+          await interaction.editReply(errorResponse);
         } else {
+          console.log('Not replied yet, sending reply...');
           await interaction.reply(errorResponse);
         }
       } catch (err) {
-        console.error('Failed to send error message:', err);
+        console.error('❌ Failed to send error message:', err.message);
       }
     }
   }
@@ -121,7 +176,6 @@ async function handleTeamModalSubmit(interaction) {
 
     console.log('Team name:', teamName);
 
-    // Validate team name
     if (!teamName || teamName.length < 3) {
       const embed = createErrorEmbed(
         'Invalid Team Name',
@@ -130,15 +184,14 @@ async function handleTeamModalSubmit(interaction) {
       return await interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    // Get all server roles (exclude @everyone and bot roles)
     const roles = interaction.guild.roles.cache
       .filter(role => 
-        !role.managed && // Not a bot role
-        role.id !== interaction.guild.id && // Not @everyone
+        !role.managed &&
+        role.id !== interaction.guild.id &&
         role.name !== '@everyone'
       )
       .sort((a, b) => b.position - a.position)
-      .first(25); // Discord dropdown limit
+      .first(25);
 
     if (roles.length === 0) {
       const embed = createErrorEmbed(
@@ -153,7 +206,6 @@ async function handleTeamModalSubmit(interaction) {
 
     console.log(`Found ${roles.length} available roles`);
 
-    // Create role selection dropdown
     const selectMenu = new StringSelectMenuBuilder()
       .setCustomId('team_role_select')
       .setPlaceholder('Select the role that represents this team')
@@ -161,14 +213,14 @@ async function handleTeamModalSubmit(interaction) {
         roles.map(role => ({
           label: role.name.length > 100 ? role.name.substring(0, 97) + '...' : role.name,
           description: `${role.members.size} members with this role`,
-          value: `${teamName}|||${role.id}` // Store both team name and role ID
+          value: `${teamName}|||${role.id}`
         }))
       );
 
     const row = new ActionRowBuilder().addComponents(selectMenu);
 
     await interaction.reply({
-      content: `🏆 **Creating Team: ${teamName}**\n\nWhich Discord role should be linked to this team?\nMembers with this role will automatically be added to the team.`,
+      content: `🏆 **Creating Team: ${teamName}**\n\nWhich Discord role should be linked to this team?\nMembers with this role will automatically be part of the team.`,
       components: [row],
       ephemeral: true
     });
@@ -210,9 +262,11 @@ async function handleTeamRoleSelect(interaction) {
 
     console.log('Team details:', { teamName, roleId, guildId: interaction.guild.id });
 
-    // Check if team with this role already exists
-    const existingTeam = await prisma.team.findUnique({
-      where: { roleId: roleId }
+    const existingTeam = await prisma.team.findFirst({
+      where: { 
+        guildId: interaction.guild.id,
+        roleId: roleId 
+      }
     });
 
     if (existingTeam) {
@@ -227,7 +281,6 @@ async function handleTeamRoleSelect(interaction) {
       return await interaction.editReply({ embeds: [embed], components: [] });
     }
 
-    // Create the team
     const team = await prisma.team.create({
       data: {
         guildId: interaction.guild.id,
@@ -239,7 +292,6 @@ async function handleTeamRoleSelect(interaction) {
 
     console.log('✅ Team created:', team.id);
 
-    // Get the role for display
     const role = interaction.guild.roles.cache.get(roleId);
 
     const embed = createSuccessEmbed(
@@ -296,7 +348,6 @@ async function handleDeleteTeamSelect(interaction) {
       return await interaction.editReply({ embeds: [embed], components: [] });
     }
 
-    // Delete the team (cascades to players and events)
     await prisma.team.delete({
       where: { id: teamId }
     });
@@ -338,19 +389,16 @@ async function handleEventModalSubmit(interaction) {
     const { createSuccessEmbed, createErrorEmbed, createEventEmbed, createWarningEmbed } = require('./utils/embeds');
     const config = require('./config/config');
 
-    // Extract team ID from modal custom ID (format: create_event_modal_TEAM_ID)
     const teamId = interaction.customId.replace('create_event_modal_', '');
 
     console.log('📅 Creating event for team:', teamId);
 
-    // Get form values
     let name = interaction.fields.getTextInputValue('event_name');
     let date = interaction.fields.getTextInputValue('event_date');
     let time = interaction.fields.getTextInputValue('event_time');
     let gameType = interaction.fields.getTextInputValue('event_game') || null;
     let notes = interaction.fields.getTextInputValue('event_notes') || null;
 
-    // Sanitize inputs
     name = sanitizeInput(name, 100);
     date = sanitizeInput(date, 50);
     time = sanitizeInput(time, 50);
@@ -359,7 +407,6 @@ async function handleEventModalSubmit(interaction) {
 
     console.log('Event details:', { name, date, time, gameType });
 
-    // Validate event name
     if (!name || name.length < 3) {
       const embed = createErrorEmbed(
         'Invalid Event Name',
@@ -368,7 +415,6 @@ async function handleEventModalSubmit(interaction) {
       return await interaction.editReply({ embeds: [embed] });
     }
 
-    // Validate date
     if (!isValidDate(date)) {
       const embed = createErrorEmbed(
         'Invalid Date Format',
@@ -380,7 +426,6 @@ async function handleEventModalSubmit(interaction) {
       return await interaction.editReply({ embeds: [embed] });
     }
 
-    // Validate time
     if (!isValidTime(time)) {
       const embed = createErrorEmbed(
         'Invalid Time Format',
@@ -392,7 +437,6 @@ async function handleEventModalSubmit(interaction) {
       return await interaction.editReply({ embeds: [embed] });
     }
 
-    // Get team
     const team = await prisma.team.findUnique({
       where: { id: teamId }
     });
@@ -407,7 +451,6 @@ async function handleEventModalSubmit(interaction) {
 
     console.log('Team found:', team.name);
 
-    // Check team limits
     try {
       const limits = await checkTeamLimits(teamId);
 
@@ -422,10 +465,8 @@ async function handleEventModalSubmit(interaction) {
       }
     } catch (limitError) {
       console.log('Could not check team limits:', limitError.message);
-      // Continue anyway - limits are not critical for event creation
     }
 
-    // Create the event embed message
     const eventEmbed = createEventEmbed({
       name,
       date,
@@ -440,7 +481,6 @@ async function handleEventModalSubmit(interaction) {
 
     console.log('Event message sent:', eventMessage.id);
 
-    // Add reactions
     try {
       await eventMessage.react(config.emojis.available);
       await eventMessage.react(config.emojis.unavailable);
@@ -448,10 +488,8 @@ async function handleEventModalSubmit(interaction) {
       console.log('✅ Reactions added');
     } catch (reactionError) {
       console.error('⚠️ Could not add reactions:', reactionError.message);
-      // Continue anyway - reactions are helpful but not critical
     }
 
-    // Save event to database
     const event = await prisma.event.create({
       data: {
         teamId: teamId,
@@ -468,7 +506,6 @@ async function handleEventModalSubmit(interaction) {
 
     console.log(`✅ Event created: ${name} (${event.id}) for team ${team.name}`);
 
-    // Send confirmation
     const confirmEmbed = createSuccessEmbed(
       'Event Created!',
       `✅ **${name}** has been created for **${team.name}**!\n\n` +
@@ -510,7 +547,6 @@ async function handleTeamSelectForEvent(interaction) {
     
     console.log('📋 Team selected for event:', teamId);
 
-    // Get the team
     const team = await prisma.team.findUnique({
       where: { id: teamId }
     });
@@ -526,7 +562,6 @@ async function handleTeamSelectForEvent(interaction) {
 
     console.log('Showing event modal for team:', team.name);
 
-    // Show the event creation modal
     const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 
     const modal = new ModalBuilder()
@@ -617,7 +652,6 @@ async function handleDeleteEventSelect(interaction) {
     const { createSuccessEmbed, createErrorEmbed } = require('./utils/embeds');
     const eventId = interaction.values[0];
 
-    // Find the event
     const event = await prisma.event.findUnique({
       where: { id: eventId },
       include: {
@@ -636,14 +670,12 @@ async function handleDeleteEventSelect(interaction) {
       return await interaction.editReply({ embeds: [embed], components: [] });
     }
 
-    // Delete the event (cascades to responses)
     await prisma.event.delete({
       where: { id: eventId }
     });
 
     console.log(`✅ Event deleted: ${event.name} (${event._count.responses} responses)`);
 
-    // Try to delete the Discord message
     if (event.messageId && event.channelId) {
       try {
         const channel = await interaction.guild.channels.fetch(event.channelId);
@@ -681,116 +713,119 @@ async function handleDeleteEventSelect(interaction) {
 }
 
 // ============================================================================
-// ERROR HANDLERS
+// REACTION ADD HANDLER
 // ============================================================================
-
-process.on('unhandledRejection', error => {
-  console.error('❌ Unhandled promise rejection:', error);
-});
-
-process.on('uncaughtException', error => {
-  console.error('❌ Uncaught exception:', error);
-  process.exit(1);
-});
-
-
-
-
 
 client.on('messageReactionAdd', async (reaction, user) => {
-  // Ignore bot reactions
   if (user.bot) return;
 
-  try {
-    // Fetch partial messages
-    if (reaction.partial) {
-      await reaction.fetch();
-    }
-    if (reaction.message.partial) {
-      await reaction.message.fetch();
-    }
-
-    console.log(`👍 Reaction from ${user.tag}: ${reaction.emoji.name}`);
-
-    // Check if this is an event message
-    const { getEventByMessageId, getOrCreatePlayer, setPlayerResponse } = require('./utils/database');
-    
-    const event = await getEventByMessageId(reaction.message.id);
-    
-    if (!event) {
-      console.log('Not an event message, ignoring');
-      return; // Not an event message
-    }
-
-    console.log(`📅 Event reaction: ${event.name} (Team: ${event.team.name})`);
-
-    // Check if user has the team role
-    const member = await reaction.message.guild.members.fetch(user.id);
-    const hasTeamRole = member.roles.cache.has(event.team.roleId);
-
-    if (!hasTeamRole) {
-      console.log(`⚠️ User ${user.tag} doesn't have team role ${event.team.roleId}`);
-      
-      // Remove their reaction
-      await reaction.users.remove(user.id);
-      
-      // Send them a message
-      try {
-        await user.send(
-          `❌ You don't have the required role for **${event.team.name}**.\n\n` +
-          `Only members with the team role can mark availability for this event.`
-        );
-      } catch (dmError) {
-        console.log('Could not DM user:', dmError.message);
-      }
-      
-      return;
-    }
-
-    // Determine status based on emoji
-    const config = require('./config/config');
-    let status = null;
-
-    if (reaction.emoji.name === config.emojis.available || reaction.emoji.toString() === '✅') {
-      status = 'available';
-    } else if (reaction.emoji.name === config.emojis.unavailable || reaction.emoji.toString() === '❌') {
-      status = 'unavailable';
-    } else if (reaction.emoji.name === config.emojis.maybe || reaction.emoji.toString() === '❓') {
-      status = 'maybe';
-    }
-
-    if (!status) {
-      console.log(`Unknown emoji: ${reaction.emoji.name}, ignoring`);
-      return; // Not a status emoji
-    }
-
-    console.log(`Status: ${status}`);
-
-    // Get or create player (auto-adds to database)
-    const player = await getOrCreatePlayer(user.id, user.username, event.team.id);
-    
-    console.log(`✅ Player ensured in database: ${player.username}`);
-
-    // Remove other status reactions from this user
-    const message = reaction.message;
-    for (const [, messageReaction] of message.reactions.cache) {
-      if (messageReaction.emoji.name !== reaction.emoji.name) {
-        await messageReaction.users.remove(user.id).catch(() => {});
-      }
-    }
-
-    // Save their response
-    await setPlayerResponse(player.id, event.id, status);
-
-    console.log(`✅ Response saved: ${user.tag} → ${status} for ${event.name}`);
-
-  } catch (error) {
-    console.error('❌ Error handling reaction:', error);
+  const key = `${user.id}-${reaction.message.id}`;
+  
+  if (reactionQueue.has(key)) {
+    clearTimeout(reactionQueue.get(key));
   }
+  
+  const timeout = setTimeout(async () => {
+    try {
+      if (reaction.partial) await reaction.fetch();
+      if (reaction.message.partial) await reaction.message.fetch();
+
+      console.log(`👍 Reaction from ${user.tag}: ${reaction.emoji.name}`);
+
+      const { getEventByMessageId, getOrCreatePlayer, setPlayerResponse } = require('./utils/database');
+      
+      const event = await getEventByMessageId(reaction.message.id);
+      
+      if (!event) {
+        console.log('Not an event message, ignoring');
+        return;
+      }
+
+      console.log(`📅 Event reaction: ${event.name} (Team: ${event.team.name})`);
+
+      const member = await reaction.message.guild.members.fetch(user.id);
+      const hasTeamRole = member.roles.cache.has(event.team.roleId);
+
+      if (!hasTeamRole) {
+        console.log(`⚠️ User ${user.tag} doesn't have team role`);
+        
+        await reaction.users.remove(user.id);
+        
+        try {
+          await user.send(
+            `❌ You don't have the required role for **${event.team.name}**.\n\n` +
+            `Only members with the team role can mark availability.`
+          );
+        } catch (dmError) {
+          console.log('Could not DM user:', dmError.message);
+        }
+        
+        return;
+      }
+
+      const emojiStr = reaction.emoji.toString();
+      let status = null;
+
+      if (emojiStr === '✅') {
+        status = 'available';
+      } else if (emojiStr === '❌') {
+        status = 'unavailable';
+      } else if (emojiStr === '❓') {
+        status = 'maybe';
+      } else {
+        console.log(`Unknown emoji: ${emojiStr}, ignoring`);
+        return;
+      }
+
+      console.log(`Status: ${status}`);
+
+      try {
+        const player = await getOrCreatePlayer(user.id, user.username, event.team.id);
+        console.log(`✅ Player ensured in database: ${player.username}`);
+
+        const message = reaction.message;
+        for (const [, messageReaction] of message.reactions.cache) {
+          if (messageReaction.emoji.toString() !== emojiStr) {
+            await messageReaction.users.remove(user.id).catch(() => {});
+          }
+        }
+
+        await setPlayerResponse(player.id, event.id, status);
+
+        console.log(`✅ Response saved: ${user.tag} → ${status} for ${event.name}`);
+
+      } catch (playerError) {
+        if (playerError.isLimitError) {
+          console.log(`⚠️ Player limit reached: ${user.tag}`);
+          
+          await reaction.users.remove(user.id);
+          
+          try {
+            await user.send(
+              `❌ **Team at Player Limit**\n\n` +
+              `The team **${event.team.name}** is at the free tier limit.\n\n` +
+              `Ask your team admin to upgrade!`
+            );
+          } catch (dmError) {
+            console.log('Could not DM user about limit:', dmError.message);
+          }
+        } else {
+          throw playerError;
+        }
+      }
+
+    } catch (error) {
+      console.error('❌ Error handling reaction:', error);
+    } finally {
+      reactionQueue.delete(key);
+    }
+  }, 500);
+  
+  reactionQueue.set(key, timeout);
 });
 
 // ============================================================================
-// REACTION REMOVE HANDLER - Remove availability when reaction removed
+// REACTION REMOVE HANDLER
 // ============================================================================
 
 client.on('messageReactionRemove', async (reaction, user) => {
@@ -803,8 +838,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
     console.log(`👎 Reaction removed from ${user.tag}: ${reaction.emoji.name}`);
 
     const { getEventByMessageId } = require('./utils/database');
-    const { PrismaClient } = require('@prisma/client');
-    const prisma = new PrismaClient();
     
     const event = await getEventByMessageId(reaction.message.id);
     
@@ -812,7 +845,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
 
     console.log(`📅 Reaction removed from event: ${event.name}`);
 
-    // Find the player
     const player = await prisma.player.findFirst({
       where: {
         discordId: user.id,
@@ -825,7 +857,6 @@ client.on('messageReactionRemove', async (reaction, user) => {
       return;
     }
 
-    // Delete their response
     await prisma.response.deleteMany({
       where: {
         playerId: player.id,
@@ -839,6 +870,44 @@ client.on('messageReactionRemove', async (reaction, user) => {
     console.error('❌ Error handling reaction removal:', error);
   }
 });
+
+// ============================================================================
+// GRACEFUL SHUTDOWN
+// ============================================================================
+
+async function shutdown() {
+  console.log('\n🛑 Shutting down gracefully...');
+  
+  try {
+    await prisma.$disconnect();
+    console.log('✅ Database disconnected');
+    
+    client.destroy();
+    console.log('✅ Discord client destroyed');
+    
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during shutdown:', error);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+// ============================================================================
+// ERROR HANDLERS
+// ============================================================================
+
+process.on('unhandledRejection', error => {
+  console.error('❌ Unhandled promise rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+  console.error('❌ Uncaught exception:', error);
+  process.exit(1);
+});
+
 // ============================================================================
 // LOGIN
 // ============================================================================

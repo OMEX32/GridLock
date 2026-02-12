@@ -1,15 +1,18 @@
 const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'production' ? ['error'] : ['query', 'error', 'warn'],
+});
+
+// Graceful shutdown
+process.on('beforeExit', async () => {
+  await prisma.$disconnect();
+});
 
 // ============================================================================
 // TEAM FUNCTIONS
 // ============================================================================
 
-// NOTE: In multi-team system, we don't use "getOrCreateTeam" by guildId anymore
-// because multiple teams can exist per server. Instead, we get teams by role or list all teams.
-
-// Get team by ID
 async function getTeamById(teamId) {
   const team = await prisma.team.findUnique({
     where: { id: teamId },
@@ -21,7 +24,6 @@ async function getTeamById(teamId) {
   return team;
 }
 
-// Get team by role ID
 async function getTeamByRoleId(roleId) {
   const team = await prisma.team.findUnique({
     where: { roleId: roleId },
@@ -33,7 +35,6 @@ async function getTeamByRoleId(roleId) {
   return team;
 }
 
-// Get all teams in a guild
 async function getGuildTeams(guildId) {
   const teams = await prisma.team.findMany({
     where: { guildId: guildId },
@@ -50,9 +51,7 @@ async function getGuildTeams(guildId) {
 // PLAYER FUNCTIONS
 // ============================================================================
 
-// Get or create player
 async function getOrCreatePlayer(discordId, username, teamId) {
-  // First check if player already exists
   let player = await prisma.player.findFirst({
     where: {
       discordId: discordId,
@@ -61,7 +60,6 @@ async function getOrCreatePlayer(discordId, username, teamId) {
   });
 
   if (player) {
-    // Player exists, just update username if changed
     if (player.username !== username) {
       player = await prisma.player.update({
         where: { id: player.id },
@@ -71,22 +69,18 @@ async function getOrCreatePlayer(discordId, username, teamId) {
     return player;
   }
 
-  // Player doesn't exist, check if we can add them
   const { canAddPlayer } = require('./limits');
   const limitCheck = await canAddPlayer(teamId);
 
   if (!limitCheck.allowed) {
-    // Hit the limit!
     console.log(`❌ Cannot add player ${username} to team ${teamId}: ${limitCheck.reason}`);
     
-    // Throw error with helpful message
     const error = new Error(limitCheck.reason);
     error.isLimitError = true;
     error.limitInfo = limitCheck;
     throw error;
   }
 
-  // Limit OK, create the player
   player = await prisma.player.create({
     data: {
       discordId: discordId,
@@ -95,9 +89,8 @@ async function getOrCreatePlayer(discordId, username, teamId) {
     },
   });
 
-  console.log(`✅ Added player: ${username} to team (${limitCheck.currentCount + 1}/${limitCheck.limit || '∞'})`);
+  console.log(`✅ Added player: ${username} (${limitCheck.currentCount + 1}/${limitCheck.limit || '∞'})`);
 
-  // Warn if approaching limit
   if (limitCheck.limit && (limitCheck.currentCount + 1) >= limitCheck.limit - 2) {
     console.log(`⚠️ Team approaching player limit: ${limitCheck.currentCount + 1}/${limitCheck.limit}`);
   }
@@ -105,11 +98,19 @@ async function getOrCreatePlayer(discordId, username, teamId) {
   return player;
 }
 
+async function getTeamPlayers(teamId) {
+  const players = await prisma.player.findMany({
+    where: { teamId },
+    orderBy: { username: 'asc' },
+  });
+
+  return players;
+}
+
 // ============================================================================
 // EVENT FUNCTIONS
 // ============================================================================
 
-// Create event (kept for backwards compatibility)
 async function createEvent(teamId, name, date, time, gameType, createdBy, messageId, channelId) {
   const event = await prisma.event.create({
     data: {
@@ -128,7 +129,6 @@ async function createEvent(teamId, name, date, time, gameType, createdBy, messag
   return event;
 }
 
-// Get upcoming events for a team
 async function getUpcomingEvents(teamId, limit = 10) {
   const events = await prisma.event.findMany({
     where: { teamId },
@@ -146,7 +146,6 @@ async function getUpcomingEvents(teamId, limit = 10) {
   return events;
 }
 
-// Get event by ID
 async function getEventById(eventId) {
   const event = await prisma.event.findUnique({
     where: { id: eventId },
@@ -167,7 +166,6 @@ async function getEventById(eventId) {
   return event;
 }
 
-// Get event by message ID
 async function getEventByMessageId(messageId) {
   const event = await prisma.event.findFirst({
     where: { messageId },
@@ -192,7 +190,6 @@ async function getEventByMessageId(messageId) {
 // RESPONSE FUNCTIONS
 // ============================================================================
 
-// Set player response
 async function setPlayerResponse(playerId, eventId, status) {
   const response = await prisma.response.upsert({
     where: {
@@ -215,21 +212,10 @@ async function setPlayerResponse(playerId, eventId, status) {
   return response;
 }
 
-// Get all players in a team
-async function getTeamPlayers(teamId) {
-  const players = await prisma.player.findMany({
-    where: { teamId },
-    orderBy: { username: 'asc' },
-  });
-
-  return players;
-}
-
 // ============================================================================
 // TEAM LIMITS
 // ============================================================================
 
-// Check team limits
 async function checkTeamLimits(teamId) {
   const team = await prisma.team.findUnique({
     where: { id: teamId },
@@ -242,6 +228,10 @@ async function checkTeamLimits(teamId) {
       }
     },
   });
+
+  if (!team) {
+    throw new Error('Team not found');
+  }
 
   const config = require('../config/config');
   const limits = config.limits[team.tier];
@@ -261,7 +251,6 @@ async function checkTeamLimits(teamId) {
 // CLEANUP
 // ============================================================================
 
-// Clean old events (for free tier 30-day limit)
 async function cleanOldEvents() {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);

@@ -1,5 +1,3 @@
-// schema.prisma - Updated for Multi-Team Architecture
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,49 +9,49 @@ datasource db {
 
 model Team {
   id          String   @id @default(cuid())
-  guildId     String   // Discord server ID
-  name        String   // Team name (e.g., "Valorant Team", "League Team")
-  roleId      String   @unique // Discord role ID for this team
+  guildId     String
+  name        String
+  roleId      String   // ✅ Removed @unique
   tier        String   @default("free")
-  createdBy   String   // Discord user ID who created the team
+  createdBy   String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
   players     Player[]
   events      Event[]
   
-  @@unique([guildId, roleId]) // Each role can only have one team per server
+  @@unique([guildId, roleId]) // ✅ roleId unique per guild
   @@index([guildId])
   @@index([roleId])
 }
 
 model Player {
   id        String   @id @default(cuid())
-  discordId String   // Discord user ID
+  discordId String
   username  String
   teamId    String
-  addedBy   String?  // Who manually added this player (if not auto-added by role)
+  addedBy   String?
   createdAt DateTime @default(now())
   
   team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
   responses Response[]
   
-  @@unique([discordId, teamId]) // User can be in multiple teams
+  @@unique([discordId, teamId])
   @@index([teamId])
   @@index([discordId])
 }
 
 model Event {
   id          String   @id @default(cuid())
-  teamId      String   // Which team this event belongs to
+  teamId      String
   name        String
   date        String
   time        String
   gameType    String?
   notes       String?
-  createdBy   String   // Discord user ID
-  messageId   String?  // Discord message ID
-  channelId   String?  // Discord channel ID
+  createdBy   String
+  messageId   String?
+  channelId   String?
   createdAt   DateTime @default(now())
   
   team      Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
@@ -61,13 +59,14 @@ model Event {
   
   @@index([teamId])
   @@index([createdAt])
+  @@index([messageId]) // ✅ ADDED THIS INDEX
 }
 
 model Response {
   id        String   @id @default(cuid())
   playerId  String
   eventId   String
-  status    String   // "available", "unavailable", "maybe"
+  status    String
   timestamp DateTime @default(now())
   updatedAt DateTime @updatedAt
   
